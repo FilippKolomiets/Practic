@@ -2,6 +2,8 @@ import fitz
 import json
 import os
 import ollama
+from natasha import Segmenter
+from natasha import Doc
 
 class DatasetBuilder:
     def __init__(self, folder, roots):
@@ -9,6 +11,7 @@ class DatasetBuilder:
         self.roots = roots
         self.files = self.get_pdf_files()
         self.model = "qwen2.5:7b"
+        self.segmenter = Segmenter()
 
     def get_pdf_files(self):
         files = []
@@ -47,6 +50,8 @@ class DatasetBuilder:
         cleaned_block = cleaned_block.replace("\n", " ")
 
         cleaned_block = cleaned_block.replace("\t", " ")
+
+        cleaned_block = cleaned_block.replace("- ", "")
 
         while "  " in cleaned_block:
             cleaned_block = cleaned_block.replace("  ", " ")
@@ -101,6 +106,45 @@ class DatasetBuilder:
 
         return source_data
 
+    def make_sense_fragment(self, blocks, block_index):
+        start_block = block_index - 1
+        end_block = block_index + 1
+
+        if start_block < 0:
+            start_block = 0
+
+        if end_block >= len(blocks):
+            end_block = len(blocks) - 1
+
+        fragment_text = ""
+
+        for i in range(start_block, end_block + 1):
+            fragment_text = fragment_text + blocks[i]["text"] + " "
+
+        fragment_text = self.clean_block_text(fragment_text)
+
+        doc = Doc(fragment_text)
+
+        doc.segment(self.segmenter)
+
+        final_fragment = ""
+
+        for sentence in doc.sents:
+            sentence_text = sentence.text.strip()
+
+            if sentence_text != "":
+                final_fragment = final_fragment + sentence_text + " "
+
+        final_fragment = self.clean_block_text(final_fragment)
+
+        fragment_data = {
+            "text": final_fragment,
+            "start_index": blocks[start_block]["start_index"],
+            "end_index": blocks[end_block]["end_index"]
+        }
+
+        return fragment_data
+
     def read_pdf(self, pdf_path):
         document = fitz.open(pdf_path)
 
@@ -118,6 +162,8 @@ class DatasetBuilder:
 
             blocks = page.get_text("blocks")
 
+            page_blocks = []
+
             for one_block in blocks:
                 block_text = one_block[4]
 
@@ -128,18 +174,31 @@ class DatasetBuilder:
 
                     end_index = global_index + len(cleaned_block)
 
-                    if self.block_has_root(cleaned_block):
-                        block_data = {
-                            "page": page_number + 1,
-                            "type": "text",
-                            "start_index": start_index,
-                            "end_index": end_index,
-                            "fragment": cleaned_block
-                        }
+                    block_data = {
+                        "text": cleaned_block,
+                        "start_index": start_index,
+                        "end_index": end_index
+                    }
 
-                        found_blocks.append(block_data)
+                    page_blocks.append(block_data)
 
                     global_index = end_index + 1
+
+            for block_index in range(len(page_blocks)):
+                current_block = page_blocks[block_index]
+
+                if self.block_has_root(current_block["text"]):
+                    sense_fragment = self.make_sense_fragment(page_blocks, block_index)
+
+                    result_data = {
+                        "page": page_number + 1,
+                        "type": "text",
+                        "start_index": sense_fragment["start_index"],
+                        "end_index": sense_fragment["end_index"],
+                        "fragment": sense_fragment["text"]
+                    }
+
+                    found_blocks.append(result_data)
 
         return found_blocks, first_page_text
 
